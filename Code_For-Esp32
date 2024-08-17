@@ -1,1 +1,204 @@
+#include <Arduino.h>
+
+// Motor Pins
+#define IN1_PIN 18
+#define IN2_PIN 19
+#define IN3_PIN 21
+#define IN4_PIN 22
+
+// IR Sensor Pins
+#define NUM_SENSORS 6
+uint8_t sensorPins[NUM_SENSORS] = {34, 35, 32, 33, 25, 26}; // Use appropriate GPIO numbers
+
+// PWM Configuration
+#define PWM_FREQ 1000
+#define PWM_RESOLUTION 8
+#define PWM_CHANNEL_LEFT 0
+#define PWM_CHANNEL_RIGHT 1
+
+// PID Constants
+float Kp = 3.5;
+float Ki = 0.0;
+float Kd = 1.2;
+
+// PID Variables
+float error = 0, prevError = 0, integral = 0, derivative = 0, correction = 0;
+int baseSpeed = 128; // Adjusted base speed for 8-bit PWM
+int maxSpeed = 255;  // Maximum speed for 8-bit PWM
+int integralMax = 1000; // Limiting integral to avoid windup
+
+// Sensor Weights
+int sensorWeight[NUM_SENSORS] = {-3, -2, -1, 1, 2, 3};
+
+// Control Flags
+bool isIntersection = false;
+bool isSharpTurn = false;
+bool isReverseColor = false; // Set to true if you detect reverse color (black on white)
+
+// Timing Variables for Turns and Delays
+unsigned long turnStartTime = 0;
+unsigned long turnDelay = 500; // Delay time for sharp turns (in milliseconds)
+unsigned long lastValidLineTime = 0; // Track when the line was last detected
+
+void setup() {
+  // Motor GPIO Setup
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+  pinMode(IN3_PIN, OUTPUT);
+  pinMode(IN4_PIN, OUTPUT);
+
+  // IR Sensor GPIO Setup
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    pinMode(sensorPins[i], INPUT);
+  }
+
+  // Configure PWM channels
+  ledcSetup(PWM_CHANNEL_LEFT, PWM_FREQ, PWM_RESOLUTION);
+  ledcSetup(PWM_CHANNEL_RIGHT, PWM_FREQ, PWM_RESOLUTION);
+  
+  // Attach PWM channels to pins
+  ledcAttachPin(IN1_PIN, PWM_CHANNEL_LEFT);
+  ledcAttachPin(IN2_PIN, PWM_CHANNEL_LEFT);
+  ledcAttachPin(IN3_PIN, PWM_CHANNEL_RIGHT);
+  ledcAttachPin(IN4_PIN, PWM_CHANNEL_RIGHT);
+
+  Serial.begin(115200); // Use a higher baud rate for better performance
+}
+
+void loop() {
+  int sensorValues[NUM_SENSORS];
+  readSensors(sensorValues);
+
+  if (detectAllBlack(sensorValues)) {
+    handleAllBlack();
+  } else if (detectAllWhite(sensorValues)) {
+    handleAllWhite();
+  } else if (detectIntersection(sensorValues)) {
+    handleIntersection(sensorValues);
+  } else if (detectSharpTurn(sensorValues)) {
+    handleSharpTurn(sensorValues);
+  } else {
+    int position = calculatePosition(sensorValues);
+    pidControl(position);
+  }
+}
+
+// Motor Control Function
+void motorControl(int leftSpeed, int rightSpeed) {
+  leftSpeed = constrain(leftSpeed, 0, maxSpeed);
+  rightSpeed = constrain(rightSpeed, 0, maxSpeed);
+
+  // Left Motor Control
+  ledcWrite(PWM_CHANNEL_LEFT, leftSpeed);
+
+  // Right Motor Control
+  ledcWrite(PWM_CHANNEL_RIGHT, rightSpeed);
+}
+
+// Sensor Reading Function
+void readSensors(int *sensorValues) {
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    sensorValues[i] = isReverseColor ? !digitalRead(sensorPins[i]) : digitalRead(sensorPins[i]);
+  }
+}
+
+// Calculate the Line Position Based on Sensor Weights
+int calculatePosition(int *sensorValues) {
+  int weightedSum = 0, sum = 0;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorValues[i] == HIGH) {
+      weightedSum += sensorWeight[i];
+      sum++;
+    }
+  }
+  if (sum == 0) {
+    return 0; // Fallback: consider a center position or custom behavior
+  }
+  lastValidLineTime = millis(); // Track the last time the line was detected
+  return weightedSum / sum;
+}
+
+// PID Control for Line Following
+void pidControl(int position) {
+  error = position;
+  integral += error;
+  integral = constrain(integral, -integralMax, integralMax); // Prevent integral windup
+  derivative = error - prevError;
+
+  correction = (Kp * error) + (Ki * integral) + (Kd * derivative);
+  prevError = error;
+
+  int leftSpeed = baseSpeed - correction;
+  int rightSpeed = baseSpeed + correction;
+
+  motorControl(leftSpeed, rightSpeed);
+}
+
+// Detect if All Sensors are Detecting Black (Black Spot)
+bool detectAllBlack(int *sensorValues) {
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorValues[i] == LOW) return false; // If any sensor is LOW, it’s not all black
+  }
+  return true;
+}
+
+// Handle Black Spot (Drive Straight Until Line is Found Again)
+void handleAllBlack() {
+  Serial.println("All sensors detect black. Handling black spot...");
+  motorControl(baseSpeed, baseSpeed); // Drive straight temporarily
+  delay(200); // Adjust delay as needed to pass the black spot
+}
+
+// Detect if All Sensors are Detecting White (White Spot)
+bool detectAllWhite(int *sensorValues) {
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorValues[i] == HIGH) return false; // If any sensor is HIGH, it’s not all white
+  }
+  return true;
+}
+
+// Handle White Spot (Stop or Rotate to Search for the Line)
+void handleAllWhite() {
+  Serial.println("All sensors detect white. Handling white spot...");
+  if (millis() - lastValidLineTime > 500) {
+    // If no line has been detected for more than 500ms
+    motorControl(-baseSpeed, baseSpeed); // Rotate to search for the line
+    delay(300); // Adjust delay as needed
+  }
+}
+
+// Detect Intersections
+bool detectIntersection(int *sensorValues) {
+  int count = 0;
+  for (int i = 0; i < NUM_SENSORS; i++) {
+    if (sensorValues[i] == HIGH) count++;
+  }
+  return count >= 4; // Adjust threshold as needed
+}
+
+// Handle Intersection Logic
+void handleIntersection(int *sensorValues) {
+  Serial.println("Intersection detected!");
+  motorControl(baseSpeed, baseSpeed);
+  delay(200); // Short delay to clear the intersection
+}
+
+// Detect Sharp Turns
+bool detectSharpTurn(int *sensorValues) {
+  return (sensorValues[0] == HIGH && sensorValues[1] == LOW && sensorValues[2] == LOW && sensorValues[3] == LOW && sensorValues[4] == LOW && sensorValues[5] == LOW) ||
+         (sensorValues[5] == HIGH && sensorValues[4] == LOW && sensorValues[3] == LOW && sensorValues[2] == LOW && sensorValues[1] == LOW && sensorValues[0] == LOW);
+}
+
+// Handle Sharp Turn Logic
+void handleSharpTurn(int *sensorValues) {
+  Serial.println("Sharp turn detected!");
+
+  if (sensorValues[0] == HIGH) {
+    motorControl(-baseSpeed, baseSpeed); // Sharp left turn
+  } else if (sensorValues[5] == HIGH) {
+    motorControl(baseSpeed, -baseSpeed); // Sharp right turn
+  }
+  
+  delay(turnDelay); // Delay to complete the turn
+}
 
