@@ -1,10 +1,10 @@
 #include <Arduino.h>
 
 // Motor Pins
-#define IN1_PIN 18
-#define IN2_PIN 19
-#define IN3_PIN 21
-#define IN4_PIN 22
+#define IN1_PIN 20
+#define IN2_PIN 21
+#define IN3_PIN 22
+#define IN4_PIN 23
 
 // IR Sensor Pins
 #define NUM_SENSORS 6
